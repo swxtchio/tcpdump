@@ -240,6 +240,9 @@ struct udphdr {
 #define ISAKMP_PORT_USER2		8500	/*XXX - nonstandard*/
 #endif
 #ifndef LWAPP_DATA_PORT
+#ifndef ISSWXTCH_PORT_DATA
+#define ISSWXTCH_PORT_DATA		9999	/*XXX - nonstandard*/
+#endif
 #define LWAPP_DATA_PORT			12222	/* RFC 5412 */
 #endif
 #ifndef LWAPP_CONTROL_PORT

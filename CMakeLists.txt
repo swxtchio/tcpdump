@@ -1211,6 +1211,7 @@ set(NETDISSECT_SOURCE_LIST_C
     print-stp.c
     print-sunatm.c
     print-sunrpc.c
+    print-swxtch.c
     print-symantec.c
     print-syslog.c
     print-tcp.c

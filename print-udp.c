@@ -677,6 +677,8 @@ udp_print(netdissect_options *ndo, const u_char *bp, u_int length,
 			quic_print(ndo, cp);
 		else if (sport == BCM_LI_PORT)
 			bcm_li_print(ndo, cp, length);
+		else if (IS_SRC_OR_DST_PORT(ISSWXTCH_PORT_DATA) && swxtch_detect(ndo, cp, length))
+			swxtch_print(ndo, cp, length);
 		else {
 			if (ulen > length && !fragmented)
 				ND_PRINT("UDP, bad length %u > %u",
