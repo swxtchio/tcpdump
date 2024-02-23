@@ -34,8 +34,10 @@
 #include "extract.h"
 #include "addrtoname.h"
 #include <stdbool.h>
+#include <stdint.h>
 
-
+#define PRINT_IP_PORT(description, ip, port) \
+    printf("%s:%d", inet_ntoa(*(struct in_addr*)&ip), ntohs(port))
 typedef enum CmdType_e
 {
     CMD_TYPE_UNKNOWN = 0,
@@ -103,42 +105,64 @@ static const struct tok cmd_type_str[] = {
 #define PACKET_TYPE_LOSSLESS (1 << 6)
 #define PACKET_TYPE_FRAGMENT (1 << 7)
 
+#define EXPECTED_SWXTCH_MDATA_TOKEN 0x01EA
+#define EXPECTED_PERF_TOKEN 0x01EA
+
+// #define DEBUG_FLAG 1
+
 // Metadata appended to a swx packet if it needs to be fragmented.
-struct SwxtchFragMetaData_t {
-    uint8_t FragmentIndex;
-    uint8_t TotalFragments;
-    uint32_t Sequence;
+#pragma pack(1)
+
+struct SwxtchMetaData_t {
+    uint16_t token;
+    uint8_t cmdType;
+    uint8_t tag;
+    uint64_t seq;
+    uint64_t timestamp;
+    uint32_t srcIP;
+    uint32_t dstIP;
+    uint16_t srcPort;
+    uint16_t dstPort;
 };
 
-typedef struct SwxtchMetaData_s {
-    uint16_t Token;
-    uint8_t CmdType;
-    uint8_t Tag;
-    uint64_t Seq;
-    uint64_t Timestamp;
-    uint32_t SrcIP;
-    uint32_t DstIP;
-    uint16_t SrcPort;
-    uint16_t DstPort;
-} SwxtchMetaData_t;
+struct SwxtchFragMetaData_t {
+    uint8_t fragmentIndex;
+    uint8_t totalFragments;
+    uint32_t sequence;
+};
+
+struct Lossless_t {
+    uint8_t fragmentIndex;
+    uint8_t totalFragments;
+    uint32_t sequence;
+};
+
+struct PerfMetaData_t {
+    uint16_t token;
+    uint64_t seq;
+    uint64_t timestamp;
+};
+#pragma pack()
 
 // SwxtchMetaData_t - SrcIP - DstIP - SrcPort - DstPort
-const size_t SWXTCH_METADATA_SIZE = sizeof(SwxtchMetaData_t) - sizeof(uint16_t) - sizeof(uint8_t) - sizeof(uint8_t) - sizeof(uint64_t) - sizeof(uint64_t);
+const size_t SWXTCH_METADATA_SIZE = sizeof(struct SwxtchMetaData_t) - sizeof(uint16_t) - sizeof(uint8_t) - sizeof(uint8_t) - sizeof(uint64_t) - sizeof(uint64_t);
 
 #define EXPECTED_TOKEN (0x01EA)
 
-static void hexprint(netdissect_options* ndo, const uint8_t* cp, size_t len) {
+static void print_hex_bytes(netdissect_options* ndo, const u_char* cp, size_t len) {
     size_t i;
 
+    ND_PRINT("Hexadecimal Bytes: ");
     for (i = 0; i < len; i++)
-        ND_PRINT("%02x", cp[i]);
+        ND_PRINT("%02x ", cp[i]);
+    ND_PRINT("\n");
 }
 
 /* Returns 1 if the first two octets looks like a swXtch packet. */
 int swxtch_detect(netdissect_options* ndo, const u_char* p, const u_int len) {
     uint16_t ExtractedToken;
 
-    if (len < sizeof(SwxtchMetaData_t))
+    if (len < sizeof(struct SwxtchMetaData_t))
         return 0;
     ExtractedToken = GET_LE_U_2(p);
     /* All swXtch packets must have the following token value */
@@ -148,90 +172,126 @@ int swxtch_detect(netdissect_options* ndo, const u_char* p, const u_int len) {
         return 0;
 }
 
+static void print_all_bytes(netdissect_options* ndo, const u_char* start, const u_char* end) {
+    size_t i;
+
+    for (i = 0; start + i < end; i++) {
+        ND_PRINT("%02x ", start[i]);
+    }
+        ND_PRINT("\n");
+
+}
+
 static const u_char* swxtch_print_packet(netdissect_options* ndo,
                                          const u_char* bp,
                                          const u_char* end) {
     static int Cached_Xflag = 0;
     static int Cached_xflag = 0;
     const u_char* sp = bp;
-    uint8_t cmdType = 0;
-    uint8_t tag = 0;
     uint8_t path_id = 0;
     uint8_t version = 0;
-    uint64_t sequence = 0;
-    uint64_t timestamp = 0;
-    const u_char* SrcIP;
-    const u_char* DstIP;
-    uint16_t srcPort = 0;
-    uint16_t dstPort = 0;
     bool isLossless = false;
     bool isFragmented = false;
+    struct PerfMetaData_t perfMetaData;
+    struct SwxtchMetaData_t swxtchMetaData;
 
-    if ((end - bp) < sizeof(SwxtchMetaData_t)) {
-        ND_PRINT(" (invalid Swxtch header length");
+    // ND_PRINT("\n--------------------------- START -------------------------------- \n");
+
+    if ((end - bp) < sizeof(struct SwxtchMetaData_t)) {
+        ND_PRINT(" (Invalid Swxtch header length)");
         return end;
     }
 
-    // Skip TOKEN
-    bp += 2;
+    memcpy(&swxtchMetaData, bp, sizeof(struct SwxtchMetaData_t));
 
-    // CmdType
-    cmdType = GET_U_1(bp);
-    bp += 1;
+    bp += sizeof(struct SwxtchMetaData_t);
 
-    // Tag
-    tag = GET_U_1(bp);
-    version = tag & VERSION_MASK;
-    path_id = (tag & PATH_ID_MASK) >> PATH_ID_OFFSET;
-    isLossless = (tag & PACKET_TYPE_LOSSLESS) != 0;
-    isFragmented = (tag & PACKET_TYPE_FRAGMENT) != 0;
-    bp += 1;
+    version = swxtchMetaData.tag & VERSION_MASK;
+    path_id = (swxtchMetaData.tag & PATH_ID_MASK) >> PATH_ID_OFFSET;
+    isLossless = (swxtchMetaData.tag & PACKET_TYPE_LOSSLESS) != 0;
+    isFragmented = (swxtchMetaData.tag & PACKET_TYPE_FRAGMENT) != 0;
 
-    // Seq;
-    sequence = GET_LE_U_8(bp);
-    bp += 8;
+    #ifdef DEBUG_FLAG
+        ND_PRINT("Tag: 0x%x\n", swxtchMetaData.tag);
+        ND_PRINT("CmdType: 0x%x\n", swxtchMetaData.cmdType);
+        ND_PRINT("Token: 0x%x\n", swxtchMetaData.token);
+        ND_PRINT("Seq %" PRIu64, swxtchMetaData.seq);
+        ND_PRINT("\n");
+        ND_PRINT("Ts %" PRIu64, swxtchMetaData.timestamp);
+        ND_PRINT("\n");
+        ND_PRINT("Version:%d\n", version);
+        ND_PRINT("path_id:%d\n", path_id);
+        ND_PRINT("isLossless:%d\n", isLossless);
+        ND_PRINT("isFragmented:%d\n", isFragmented);
+    #endif
 
-    // Timestamp;
-    timestamp = GET_LE_U_8(bp);
-    bp += 8;
-
-    ND_PRINT("%s", tok2str(cmd_type_str, "[swxtch:%u]", cmdType));
+    ND_PRINT("%s", tok2str(cmd_type_str, "[swxtch:%u]", swxtchMetaData.cmdType));
     if (version > 0) {
-        ND_PRINT("(v%i)", version);
+        ND_PRINT("(v%i): ", version);
     }
-     ND_PRINT(", Version: %u, Path ID: %u, Lossless: %s, Fragmented: %s",
-             version, path_id, isLossless ? "true" : "false",
-             isFragmented ? "true" : "false");
+    ND_PRINT("Tag: 0x%x, Token: 0x%x, Version: %u, Path ID: %u, Lossless: %s, Fragmented: %s",
+            swxtchMetaData.tag, swxtchMetaData.token, version, path_id, isLossless ? "true" : "false",
+            isFragmented ? "true" : "false");
+    
+    if ((swxtchMetaData.cmdType == CMD_TYPE_MCA_MC) || (swxtchMetaData.cmdType == CMD_TYPE_REPL_MC)
+        || (swxtchMetaData.cmdType == CMD_TYPE_BRIDGE_MC)) {
 
-    if ((cmdType == CMD_TYPE_MCA_MC) || (cmdType == CMD_TYPE_REPL_MC)
-        || (cmdType == CMD_TYPE_BRIDGE_MC)) {
         if ((end - bp) < SWXTCH_METADATA_SIZE) {
             ND_PRINT(" (invalid MC header length");
             return end;
         }
-        SrcIP = bp;
-        bp += 4;
-        DstIP = bp;
-        bp += 4;
-        srcPort = GET_BE_U_2(bp);
-        bp += 2;
-        dstPort = GET_BE_U_2(bp);
-        bp += 2;
+        
+        if (end - bp >= sizeof(struct PerfMetaData_t)) {
 
-        ND_PRINT(", %s.%s > %s.%s", GET_IPADDR_STRING(SrcIP), udpport_string(ndo, srcPort),
-                 GET_IPADDR_STRING(DstIP), udpport_string(ndo, dstPort));
+            perfMetaData = *((struct PerfMetaData_t*)bp);
+            if (perfMetaData.token == EXPECTED_PERF_TOKEN) {
+                ND_PRINT("\nPerfMetaData: Token: 0x%x, Seq: %" PRIu64 ", Timestamp: %" PRIu64,
+                    perfMetaData.token,
+                    perfMetaData.seq,
+                    perfMetaData.timestamp);
+                bp += sizeof(struct PerfMetaData_t);
+            }
+        }
+
+        ND_PRINT(", SrcIP:"); 
+        PRINT_IP_PORT("SrcIP", swxtchMetaData.srcIP, swxtchMetaData.srcPort); 
+        ND_PRINT(" > DestIP:"); 
+        PRINT_IP_PORT("DstIP", swxtchMetaData.dstIP, swxtchMetaData.dstPort); 
+        ND_PRINT("\n");
 
         if (ndo->ndo_vflag > 0) {
-            ND_PRINT(")\n        ");
             ND_PRINT("mc_off %" PRIu64, (bp - sp));
             ND_PRINT(", mc_len %" PRIu64, (end - bp));
-            ND_PRINT(", seq %" PRIu64, sequence);
-            ND_PRINT(", ts %" PRIu64, timestamp);
+            ND_PRINT(", seq %" PRIu64, swxtchMetaData.seq);
+            ND_PRINT(", ts %" PRIu64, swxtchMetaData.timestamp);
+        }
+
+        if (isFragmented) {
+            const struct SwxtchFragMetaData_t* fragMetaData = (const struct SwxtchFragMetaData_t*)(end - sizeof(struct SwxtchFragMetaData_t));
+
+            if (isLossless) {
+                const struct Lossless_t* losslessData = (const struct Lossless_t*)(end - sizeof(struct Lossless_t));
+                fragMetaData = (const struct SwxtchFragMetaData_t*)((const char*)losslessData - sizeof(struct SwxtchFragMetaData_t));
+
+                ND_PRINT("\nLossless Data: FragmentIndex=%u, TotalFragments=%u, Sequence=%u",
+                        losslessData->fragmentIndex, losslessData->totalFragments, losslessData->sequence);
+            }
+
+            ND_PRINT("\nFragmented Data: FragmentIndex=%u, TotalFragments=%u, Sequence=%u",
+                    fragMetaData->fragmentIndex, fragMetaData->totalFragments, fragMetaData->sequence);
+        }
+
+        if (isLossless && !isFragmented) {
+
+            const struct Lossless_t* losslessData = (const struct Lossless_t*)(end - sizeof(struct Lossless_t));
+
+            ND_PRINT("\nLossless Data: FragmentIndex=%u, TotalFragments=%u, Sequence=%u",
+                    losslessData->fragmentIndex, losslessData->totalFragments, losslessData->sequence);
         }
     } else {
         if (ndo->ndo_vflag > 0) {
-            ND_PRINT(", seq %" PRIu64, sequence);
-            ND_PRINT(", ts %" PRIu64, timestamp);
+            ND_PRINT(", seq %" PRIu64, swxtchMetaData.seq);
+            ND_PRINT(", ts %" PRIu64, swxtchMetaData.timestamp);
         }
     }
 
@@ -246,6 +306,7 @@ static const u_char* swxtch_print_packet(netdissect_options* ndo,
             hex_print(ndo, "\n\t", bp, (end - bp));
         }
     }
+    // ND_PRINT("\n--------------------------- END -------------------------------- \n");
 
     return end;
 }
