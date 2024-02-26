@@ -38,8 +38,7 @@
 
 #define PRINT_IP_PORT(description, ip, port) \
     printf("%s:%d", inet_ntoa(*(struct in_addr*)&ip), ntohs(port))
-typedef enum CmdType_e
-{
+typedef enum CmdType_e {
     CMD_TYPE_UNKNOWN = 0,
     CMD_TYPE_ECHO = 1,
     CMD_TYPE_IGMP = 2,
@@ -93,6 +92,31 @@ static const struct tok cmd_type_str[] = {
 	{CMD_TYPE_LOSSLESS_CTRL, "LosslessXtrl"},
 };
 
+typedef enum PktType_e {
+    ODATA,
+    RDATA,
+    FDATA,
+    ACK2,
+    HANDSHAKE,
+    NACK = 128,
+    ACK = 129,
+    HANDSHAKE_RESPONSE = 130,
+    UNKNOWN,
+}PktType_t;
+
+static const struct tok lossless_cmd_type_str[] = {
+	{0, "Invalid"},
+	{ODATA, "ODATA"},
+	{RDATA, "RDATA"},
+	{FDATA, "FDATA"},
+	{ACK2, "ACK2"},
+	{HANDSHAKE, "HANDSHAKE"},
+	{NACK, "NACK"},
+	{ACK, "ACK"},
+	{HANDSHAKE_RESPONSE, "HANDSHAKE_RESPONSE"},
+	{UNKNOWN, "UNKNOWN"},
+};
+
 // clang-format on
 
 // Masks and values for the Tag field
@@ -132,9 +156,10 @@ struct SwxtchFragMetaData_t {
 };
 
 struct Lossless_t {
-    uint8_t fragmentIndex;
-    uint8_t totalFragments;
-    uint32_t sequence;
+    uint64_t Timestamp;
+    uint64_t Seq;
+    uint16_t SrcPort_be;  // To tunnel original src port (used for channel bonding)
+    uint8_t Type;
 };
 
 struct PerfMetaData_t {
@@ -270,23 +295,23 @@ static const u_char* swxtch_print_packet(netdissect_options* ndo,
             const struct SwxtchFragMetaData_t* fragMetaData = (const struct SwxtchFragMetaData_t*)(end - sizeof(struct SwxtchFragMetaData_t));
 
             if (isLossless) {
-                const struct Lossless_t* losslessData = (const struct Lossless_t*)(end - sizeof(struct Lossless_t));
-                fragMetaData = (const struct SwxtchFragMetaData_t*)((const char*)losslessData - sizeof(struct SwxtchFragMetaData_t));
-
-                ND_PRINT("\nLossless Data: FragmentIndex=%u, TotalFragments=%u, Sequence=%u",
-                        losslessData->fragmentIndex, losslessData->totalFragments, losslessData->sequence);
+                const size_t total_size = sizeof(struct Lossless_t) + sizeof(struct SwxtchFragMetaData_t);
+                fragMetaData = (const struct SwxtchFragMetaData_t*)((const char*)end - total_size);
             }
 
             ND_PRINT("\nFragmented Data: FragmentIndex=%u, TotalFragments=%u, Sequence=%u",
-                    fragMetaData->fragmentIndex, fragMetaData->totalFragments, fragMetaData->sequence);
+                fragMetaData->fragmentIndex, fragMetaData->totalFragments, fragMetaData->sequence);
         }
 
-        if (isLossless && !isFragmented) {
+        if (isLossless) {
 
             const struct Lossless_t* losslessData = (const struct Lossless_t*)(end - sizeof(struct Lossless_t));
 
-            ND_PRINT("\nLossless Data: FragmentIndex=%u, TotalFragments=%u, Sequence=%u",
-                    losslessData->fragmentIndex, losslessData->totalFragments, losslessData->sequence);
+            ND_PRINT("\nLossless Data(%s): Seq=%lu, SrcPort=%u, Timestamp=%lu",
+                tok2str(lossless_cmd_type_str, "[type:%u]", losslessData->Type),
+                losslessData->Seq,
+                losslessData->SrcPort_be,
+                losslessData->Timestamp);
         }
     } else {
         if (ndo->ndo_vflag > 0) {
