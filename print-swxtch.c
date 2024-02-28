@@ -205,9 +205,6 @@ struct HandShakePayload {
 
 #pragma pack()
 
-// SwxtchMetaData_t - SrcIP - DstIP - SrcPort - DstPort
-const size_t SWXTCH_METADATA_SIZE = sizeof(struct SwxtchMetaData_t) - sizeof(uint16_t) - sizeof(uint8_t) - sizeof(uint8_t) - sizeof(uint64_t) - sizeof(uint64_t);
-
 #define EXPECTED_TOKEN (0x01EA)
 
 static void print_hex_bytes(netdissect_options* ndo, const u_char* cp, size_t len) {
@@ -289,7 +286,7 @@ static void lossless_print_packet (netdissect_options* ndo,
 
             for (uint32_t i = 0; i < nackPayload->rangeCount; ++i) {
                 range = &(nackPayload->ranges[i]);
-                ND_PRINT("\n\t\n\tRange %u - Start: %lu, End: %lu\n", i + 1, range->m_From, range->m_To);
+                ND_PRINT("\t\tRange %u - Start: %lu, End: %lu\n", i + 1, range->m_From, range->m_To);
             }
             break;
 
@@ -372,7 +369,7 @@ static const u_char* swxtch_print_packet(netdissect_options* ndo,
     if ((swxtchMetaData.cmdType == CMD_TYPE_MCA_MC) || (swxtchMetaData.cmdType == CMD_TYPE_REPL_MC)
         || (swxtchMetaData.cmdType == CMD_TYPE_BRIDGE_MC)) {
 
-        if ((end - bp) < SWXTCH_METADATA_SIZE) {
+        if ((end - bp) < sizeof(struct SwxtchFragMetaData_t)) {
             ND_PRINT(" (invalid MC header length");
             return end;
         }
