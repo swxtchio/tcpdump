@@ -35,6 +35,10 @@
 #include "addrtoname.h"
 #include <stdbool.h>
 #include <stdint.h>
+#include <inttypes.h>
+
+#include <stdio.h>
+#include <stdlib.h> 
 
 #define PRINT_IP_PORT(description, ip, port) \
     printf("%s:%d", inet_ntoa(*(struct in_addr*)&ip), ntohs(port))
@@ -167,6 +171,38 @@ struct PerfMetaData_t {
     uint64_t seq;
     uint64_t timestamp;
 };
+
+struct AckPayload {
+    int64_t rtt;
+    int64_t rttVar;
+    uint64_t expectedSeq;
+    uint64_t maxReceivedSeq;
+    uint64_t maxSeq;
+};
+
+typedef struct Range_t {
+    uint64_t m_From;
+    uint64_t m_To;
+} Range_t;
+struct NackPayload {
+    uint32_t totalPackets;
+    uint32_t rangeCount;
+    Range_t ranges[];
+};
+struct HandShakePayload {
+    uint8_t slpVer;
+    uint8_t acked;
+    uint16_t mtu;
+    uint64_t startSeq;
+    uint64_t ackPeriodUs;
+    // everything below is added by v 2
+    uint8_t slpMinorVer;
+    // The number of rtts to wait before considering a packet dropped
+    uint32_t lostPacketRTTs;
+    // The number of rtts to wait for control packets before considering a connection lost
+    uint32_t connectionDroppedRTTs;
+};
+
 #pragma pack()
 
 // SwxtchMetaData_t - SrcIP - DstIP - SrcPort - DstPort
@@ -204,6 +240,81 @@ static void print_all_bytes(netdissect_options* ndo, const u_char* start, const 
         ND_PRINT("%02x ", start[i]);
     }
         ND_PRINT("\n");
+
+}
+
+static void lossless_print_packet (netdissect_options* ndo,
+                                         const u_char* bp,
+                                         const u_char* end,
+                                         uint8_t losslessType) {
+    struct AckPayload *ackPayload;
+    struct Range_t *range;
+    struct NackPayload *nackPayload;
+    struct HandShakePayload *handshakePayload;
+
+    switch (losslessType) {
+        case ODATA:
+            // ODATA: No additional fields
+            break;
+
+        case RDATA:
+            // Range
+            range = (struct Range_t *)bp;
+            ND_PRINT("\n\tRange Start: %lu, End: %lu\n", range->m_From, range->m_To);
+            break;
+
+        case FDATA:
+            // FDATA: No additional fields
+            break;
+
+        case ACK2:
+            // ACK2: No additional fields
+            break;
+
+        case HANDSHAKE:
+            // HandShakePayload
+            handshakePayload = (struct HandShakePayload *)bp;
+            ND_PRINT("\n\tRTT: %" PRIu64 ", RTT Var: %" PRIu64 ", Expected Seq: %" PRIu64 ", Max Received Seq: %" PRIu64 ", Max Seq: %" PRIu64 "\n",
+             le64toh(ackPayload->rtt),
+             le64toh(ackPayload->rttVar),
+             le64toh(ackPayload->expectedSeq),
+             le64toh(ackPayload->maxReceivedSeq),
+             le64toh(ackPayload->maxSeq));
+            break;
+
+        case NACK:
+            // NackPayload
+            nackPayload = (struct NackPayload *)bp;
+            ND_PRINT("\n\tTotal Packets: %u, Range Count: %u\n", nackPayload->totalPackets, nackPayload->rangeCount);
+
+            for (uint32_t i = 0; i < nackPayload->rangeCount; ++i) {
+                range = &(nackPayload->ranges[i]);
+                ND_PRINT("\n\t\n\tRange %u - Start: %lu, End: %lu\n", i + 1, range->m_From, range->m_To);
+            }
+            break;
+
+        case ACK:
+            // AckPayload
+            ackPayload = (struct AckPayload *)bp;
+            ND_PRINT("\n\tRTT: %lu, RTT Var: %lu, Expected Seq: %lu, Max Received Seq: %lu, Max Seq: %lu\n",
+                ackPayload->rtt, ackPayload->rttVar, ackPayload->expectedSeq,  ackPayload->maxReceivedSeq,ackPayload->maxSeq);
+
+                    for (size_t i = 0; i < sizeof(struct AckPayload); ++i) {
+                        printf("%02X ", ((unsigned char *)ackPayload)[i]);
+                    }
+                    printf("\n");
+    
+                   exit(0);
+            break;
+
+        case HANDSHAKE_RESPONSE:
+            // HANDSHAKE_RESPONSE: No additional fields
+            break;
+
+        default:
+            // UNKNOWN: No additional fields
+            break;
+    }
 
 }
 
@@ -312,6 +423,8 @@ static const u_char* swxtch_print_packet(netdissect_options* ndo,
                 losslessData->Seq,
                 losslessData->SrcPort_be,
                 losslessData->Timestamp);
+
+            lossless_print_packet(ndo, bp, end, losslessData->Type);
         }
     } else {
         if (ndo->ndo_vflag > 0) {
