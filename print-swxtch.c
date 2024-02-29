@@ -160,10 +160,10 @@ struct SwxtchFragMetaData_t {
 };
 
 struct Lossless_t {
-    uint64_t Timestamp;
-    uint64_t Seq;
-    uint16_t SrcPort_be;  // To tunnel original src port (used for channel bonding)
-    uint8_t Type;
+    uint64_t timestamp;
+    uint64_t seq;
+    uint16_t srcPortBe;  // To tunnel original src port (used for channel bonding)
+    uint8_t type;
 };
 
 struct PerfMetaData_t {
@@ -207,13 +207,28 @@ struct HandShakePayload {
 
 #define EXPECTED_TOKEN (0x01EA)
 
-static void print_hex_bytes(netdissect_options* ndo, const u_char* cp, size_t len) {
-    size_t i;
+char* convertEpochTime(uint64_t epochTimeInNanos) {
+    struct tm timeinfo;
+    time_t epochSec = (time_t)(epochTimeInNanos / 1000000000);
+    
+    localtime_r(&epochSec, &timeinfo);
 
-    ND_PRINT("Hexadecimal Bytes: ");
-    for (i = 0; i < len; i++)
-        ND_PRINT("%02x ", cp[i]);
-    ND_PRINT("\n");
+    if (mktime(&timeinfo) == -1) {
+        return "invalid date format";
+    }
+
+    static char buffer[80];
+    strftime(buffer, 80, "%Y-%m-%d %H:%M:%S", &timeinfo);
+
+    return buffer;
+}
+
+char* convertTimestampFromBytes(const void* timestampBytes) {
+    uint64_t bigEndianTimestamp;
+    memcpy(&bigEndianTimestamp, timestampBytes, sizeof(bigEndianTimestamp));
+    bigEndianTimestamp = be64toh(bigEndianTimestamp);
+
+    return convertEpochTime(bigEndianTimestamp);
 }
 
 /* Returns 1 if the first two octets looks like a swXtch packet. */
@@ -237,7 +252,6 @@ static void print_all_bytes(netdissect_options* ndo, const u_char* start, const 
         ND_PRINT("%02x ", start[i]);
     }
         ND_PRINT("\n");
-
 }
 
 static void lossless_print_packet (netdissect_options* ndo,
@@ -312,19 +326,27 @@ static void lossless_print_packet (netdissect_options* ndo,
             // UNKNOWN: No additional fields
             break;
     }
+}
 
+void printBytes(const void *ptr, size_t size) {
+    const unsigned char *bytes = (const unsigned char *)ptr;
+    for (size_t i = 0; i < size; i++) {
+        printf("%02X ", bytes[i]);
+    }
+    printf("\n");
 }
 
 static const u_char* swxtch_print_packet(netdissect_options* ndo,
                                          const u_char* bp,
                                          const u_char* end) {
-    static int Cached_Xflag = 0;
-    static int Cached_xflag = 0;
     const u_char* sp = bp;
-    uint8_t path_id = 0;
-    uint8_t version = 0;
     bool isLossless = false;
     bool isFragmented = false;
+    uint8_t path_id = 0;
+    uint8_t version = 0;
+    static int Cached_xflag = 0;
+    static int Cached_Xflag = 0;
+    char* convertedDate;
     struct PerfMetaData_t perfMetaData;
     struct SwxtchMetaData_t swxtchMetaData;
 
@@ -375,13 +397,14 @@ static const u_char* swxtch_print_packet(netdissect_options* ndo,
         }
         
         if (end - bp >= sizeof(struct PerfMetaData_t)) {
-
             perfMetaData = *((struct PerfMetaData_t*)bp);
             if (perfMetaData.token == EXPECTED_PERF_TOKEN) {
-                ND_PRINT("\nPerfMetaData: Token: 0x%x, Seq: %" PRIu64 ", Timestamp: %" PRIu64,
+                
+                convertedDate = convertTimestampFromBytes(&perfMetaData.timestamp);
+                ND_PRINT("\nPerfMetaData: Token: 0x%x, Seq: %" PRIu64 ", Timestamp: %s",
                     perfMetaData.token,
                     perfMetaData.seq,
-                    perfMetaData.timestamp);
+                    convertedDate);
                 bp += sizeof(struct PerfMetaData_t);
             }
         }
@@ -396,7 +419,8 @@ static const u_char* swxtch_print_packet(netdissect_options* ndo,
             ND_PRINT("mc_off %" PRIu64, (bp - sp));
             ND_PRINT(", mc_len %" PRIu64, (end - bp));
             ND_PRINT(", seq %" PRIu64, swxtchMetaData.seq);
-            ND_PRINT(", ts %" PRIu64, swxtchMetaData.timestamp);
+            convertedDate = convertTimestampFromBytes(&swxtchMetaData.timestamp);
+            ND_PRINT(", ts %s" PRIu64, convertedDate);
         }
 
         if (isFragmented) {
@@ -415,18 +439,20 @@ static const u_char* swxtch_print_packet(netdissect_options* ndo,
 
             const struct Lossless_t* losslessData = (const struct Lossless_t*)(end - sizeof(struct Lossless_t));
 
-            ND_PRINT("\nLossless Data(%s): Seq=%lu, SrcPort=%u, Timestamp=%lu",
-                tok2str(lossless_cmd_type_str, "[type:%u]", losslessData->Type),
-                losslessData->Seq,
-                losslessData->SrcPort_be,
-                losslessData->Timestamp);
+            convertedDate = convertTimestampFromBytes(&losslessData->timestamp);
+            ND_PRINT("\nLossless Data(%s): Seq=%lu, SrcPort=%u, Timestamp=%s",
+                tok2str(lossless_cmd_type_str, "[type:%u]", losslessData->type),
+                losslessData->seq,
+                losslessData->srcPortBe,
+                convertedDate);
 
-            lossless_print_packet(ndo, bp, end, losslessData->Type);
+            lossless_print_packet(ndo, bp, end, losslessData->type);
         }
     } else {
         if (ndo->ndo_vflag > 0) {
             ND_PRINT(", seq %" PRIu64, swxtchMetaData.seq);
-            ND_PRINT(", ts %" PRIu64, swxtchMetaData.timestamp);
+            convertedDate = convertTimestampFromBytes(&swxtchMetaData.timestamp);
+            ND_PRINT(", ts %s" PRIu64, convertedDate);
         }
     }
 
