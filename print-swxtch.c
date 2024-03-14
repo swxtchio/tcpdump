@@ -207,6 +207,17 @@ struct HandShakePayload {
 
 #define EXPECTED_TOKEN (0x01EA)
 
+uint64_t bigEndianToLittleEndian64(uint64_t value) {
+    return (((value) & 0xff00000000000000ull) >> 56) |
+           (((value) & 0x00ff000000000000ull) >> 40) |
+           (((value) & 0x0000ff0000000000ull) >> 24) |
+           (((value) & 0x000000ff00000000ull) >> 8) |
+           (((value) & 0x00000000ff000000ull) << 8) |
+           (((value) & 0x0000000000ff0000ull) << 24) |
+           (((value) & 0x000000000000ff00ull) << 40) |
+           (((value) & 0x00000000000000ffull) << 56);
+}
+
 char* convertEpochTime(uint64_t epochTimeInNanos) {
     struct tm timeinfo;
     time_t epochSec = (time_t)(epochTimeInNanos / 1000000000);
@@ -309,13 +320,6 @@ static void lossless_print_packet (netdissect_options* ndo,
             ackPayload = (struct AckPayload *)bp;
             ND_PRINT("\n\tRTT: %lu, RTT Var: %lu, Expected Seq: %lu, Max Received Seq: %lu, Max Seq: %lu\n",
                 ackPayload->rtt, ackPayload->rttVar, ackPayload->expectedSeq,  ackPayload->maxReceivedSeq,ackPayload->maxSeq);
-
-                    for (size_t i = 0; i < sizeof(struct AckPayload); ++i) {
-                        printf("%02X ", ((unsigned char *)ackPayload)[i]);
-                    }
-                    printf("\n");
-    
-                   exit(0);
             break;
 
         case HANDSHAKE_RESPONSE:
@@ -334,6 +338,57 @@ void printBytes(const void *ptr, size_t size) {
         printf("%02X ", bytes[i]);
     }
     printf("\n");
+}
+
+void processPerfMetaData(netdissect_options* ndo, const u_char* bp, const u_char* end) {
+    struct PerfMetaData_t perfMetaData;
+    char* convertedDate;
+
+    if (end - bp >= sizeof(struct PerfMetaData_t)) {
+        perfMetaData = *((struct PerfMetaData_t*)bp);
+        if (perfMetaData.token == EXPECTED_PERF_TOKEN) {
+            perfMetaData.seq = bigEndianToLittleEndian64(perfMetaData.seq);
+            convertedDate = convertTimestampFromBytes(&perfMetaData.timestamp);
+            ND_PRINT("\nPerfMetaData: Token: 0x%x, Seq: %" PRIu64 ", Timestamp: %s",
+                perfMetaData.token,
+                perfMetaData.seq,
+                convertedDate);
+            bp += sizeof(struct PerfMetaData_t);
+        }
+    }
+}
+
+void processFragmentedData(netdissect_options* ndo, const u_char* end, bool isLossless) {
+    
+    const struct SwxtchFragMetaData_t* fragMetaData;
+
+    if (isLossless) {
+        const size_t total_size = sizeof(struct Lossless_t) + sizeof(struct SwxtchFragMetaData_t);
+        fragMetaData = (const struct SwxtchFragMetaData_t*)((const char*)end - total_size);
+    } else {
+        fragMetaData = (const struct SwxtchFragMetaData_t*)(end - sizeof(struct SwxtchFragMetaData_t));
+    }
+
+    ND_PRINT("\nFragmented Data: FragmentIndex=%u, TotalFragments=%u, Sequence=%u",
+        fragMetaData->fragmentIndex, fragMetaData->totalFragments, fragMetaData->sequence);
+    
+}
+
+void processLosslessData(netdissect_options* ndo, const u_char* bp, const u_char* end) {
+
+    struct Lossless_t* losslessData = (struct Lossless_t*)(end - sizeof(struct Lossless_t));
+
+ND_PRINT("-->Timestamp: %" PRIu64, losslessData->timestamp);
+
+
+    char* convertedDate =convertTimestampFromBytes(&losslessData->timestamp);
+    ND_PRINT("\nLossless Data(%s): Seq=%lu, SrcPort=%u, --->Timestamp=%s",
+        tok2str(lossless_cmd_type_str, "[type:%u]", losslessData->type),
+        losslessData->seq,
+        losslessData->srcPortBe,
+        convertedDate);
+
+    lossless_print_packet(ndo, bp, end, losslessData->type);
 }
 
 static const u_char* swxtch_print_packet(netdissect_options* ndo,
@@ -384,29 +439,20 @@ static const u_char* swxtch_print_packet(netdissect_options* ndo,
     if (version > 0) {
         ND_PRINT("(v%i): ", version);
     }
-    ND_PRINT("Tag: 0x%x, Token: 0x%x, Version: %u, Path ID: %u, Lossless: %s, Fragmented: %s",
-            swxtchMetaData.tag, swxtchMetaData.token, version, path_id, isLossless ? "true" : "false",
-            isFragmented ? "true" : "false");
+    if ((end - bp) < sizeof(struct SwxtchFragMetaData_t)) {
+        ND_PRINT(" (invalid MC header length");
+        return end;
+    }
     
     if ((swxtchMetaData.cmdType == CMD_TYPE_MCA_MC) || (swxtchMetaData.cmdType == CMD_TYPE_REPL_MC)
         || (swxtchMetaData.cmdType == CMD_TYPE_BRIDGE_MC)) {
 
-        if ((end - bp) < sizeof(struct SwxtchFragMetaData_t)) {
-            ND_PRINT(" (invalid MC header length");
-            return end;
-        }
+        ND_PRINT("Tag: 0x%x, Token: 0x%x, Version: %u, Path ID: %u, Lossless: %s, Fragmented: %s",
+                swxtchMetaData.tag, swxtchMetaData.token, version, path_id, isLossless ? "true" : "false",
+                isFragmented ? "true" : "false");
         
         if (end - bp >= sizeof(struct PerfMetaData_t)) {
-            perfMetaData = *((struct PerfMetaData_t*)bp);
-            if (perfMetaData.token == EXPECTED_PERF_TOKEN) {
-                
-                convertedDate = convertTimestampFromBytes(&perfMetaData.timestamp);
-                ND_PRINT("\nPerfMetaData: Token: 0x%x, Seq: %" PRIu64 ", Timestamp: %s",
-                    perfMetaData.token,
-                    perfMetaData.seq,
-                    convertedDate);
-                bp += sizeof(struct PerfMetaData_t);
-            }
+            processPerfMetaData(ndo, bp, end);
         }
 
         ND_PRINT(", SrcIP:"); 
@@ -422,31 +468,26 @@ static const u_char* swxtch_print_packet(netdissect_options* ndo,
             convertedDate = convertTimestampFromBytes(&swxtchMetaData.timestamp);
             ND_PRINT(", ts %s" PRIu64, convertedDate);
         }
-
-        if (isFragmented) {
-            const struct SwxtchFragMetaData_t* fragMetaData = (const struct SwxtchFragMetaData_t*)(end - sizeof(struct SwxtchFragMetaData_t));
-
-            if (isLossless) {
-                const size_t total_size = sizeof(struct Lossless_t) + sizeof(struct SwxtchFragMetaData_t);
-                fragMetaData = (const struct SwxtchFragMetaData_t*)((const char*)end - total_size);
-            }
-
-            ND_PRINT("\nFragmented Data: FragmentIndex=%u, TotalFragments=%u, Sequence=%u",
-                fragMetaData->fragmentIndex, fragMetaData->totalFragments, fragMetaData->sequence);
+        if (isFragmented){
+            processFragmentedData(ndo, end, isLossless);
         }
-
+        
         if (isLossless) {
+            processLosslessData(ndo, bp, end);
+        }
+    } else if (swxtchMetaData.cmdType == CMD_TYPE_LOSSLESS_CTRL) {
 
-            const struct Lossless_t* losslessData = (const struct Lossless_t*)(end - sizeof(struct Lossless_t));
+        ND_PRINT("Lossless: %s, Fragmented: %s", isLossless ? "true" : "false", isFragmented ? "true" : "false");
 
-            convertedDate = convertTimestampFromBytes(&losslessData->timestamp);
-            ND_PRINT("\nLossless Data(%s): Seq=%lu, SrcPort=%u, Timestamp=%s",
-                tok2str(lossless_cmd_type_str, "[type:%u]", losslessData->type),
-                losslessData->seq,
-                losslessData->srcPortBe,
-                convertedDate);
-
-            lossless_print_packet(ndo, bp, end, losslessData->type);
+        if (end - bp >= sizeof(struct PerfMetaData_t)) {
+            processPerfMetaData(ndo, bp, end);
+        }
+        if (isFragmented){
+            processFragmentedData(ndo, end, isLossless);
+        }
+        
+        if (isLossless) {
+            processLosslessData(ndo, bp, end);
         }
     } else {
         if (ndo->ndo_vflag > 0) {
