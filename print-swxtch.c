@@ -33,10 +33,11 @@
 #include "netdissect.h"
 #include "extract.h"
 #include "addrtoname.h"
+
 #include <stdbool.h>
 #include <stdint.h>
 #include <inttypes.h>
-
+#include <endian.h>
 #include <stdio.h>
 #include <stdlib.h> 
 
@@ -136,6 +137,10 @@ static const struct tok lossless_cmd_type_str[] = {
 #define EXPECTED_SWXTCH_MDATA_TOKEN 0x01EA
 #define EXPECTED_PERF_TOKEN 0x01EA
 
+#define BUFFER_SIZE 20
+#define LE 1 //LITTLE_ENDIAN
+#define BE 0 //BIG_ENDIAN
+
 // #define DEBUG_FLAG 1
 
 // Metadata appended to a swx packet if it needs to be fragmented.
@@ -218,28 +223,24 @@ uint64_t bigEndianToLittleEndian64(uint64_t value) {
            (((value) & 0x00000000000000ffull) << 56);
 }
 
-char* convertEpochTime(uint64_t epochTimeInNanos) {
-    struct tm timeinfo;
-    time_t epochSec = (time_t)(epochTimeInNanos / 1000000000);
+const char *convertUnixTimeToString(const uint64_t unixTime, int isLittleEndian) {
+    printf("Unix time (nanoseconds): %" PRIu64 "\n", unixTime);
+    time_t seconds;
+    struct tm *timeinfo;
+    uint64_t timeToUse;
+    static char buffer[BUFFER_SIZE];
+
+    timeToUse = isLittleEndian ? le64toh(unixTime) : unixTime;
     
-    localtime_r(&epochSec, &timeinfo);
+    seconds = timeToUse / 1000000000;
+    printf("Unix time (seconds): %ld\n", seconds);
 
-    if (mktime(&timeinfo) == -1) {
-        return "invalid date format";
-    }
+    timeinfo = localtime(&seconds);
+    strftime(buffer, 20, "%Y-%m-%d %H:%M:%S", timeinfo);
 
-    static char buffer[80];
-    strftime(buffer, 80, "%Y-%m-%d %H:%M:%S", &timeinfo);
+    printf("Date and Time: %s\n", buffer);
 
     return buffer;
-}
-
-char* convertTimestampFromBytes(const void* timestampBytes) {
-    uint64_t bigEndianTimestamp;
-    memcpy(&bigEndianTimestamp, timestampBytes, sizeof(bigEndianTimestamp));
-    bigEndianTimestamp = be64toh(bigEndianTimestamp);
-
-    return convertEpochTime(bigEndianTimestamp);
 }
 
 /* Returns 1 if the first two octets looks like a swXtch packet. */
@@ -249,11 +250,17 @@ int swxtch_detect(netdissect_options* ndo, const u_char* p, const u_int len) {
     if (len < sizeof(struct SwxtchMetaData_t))
         return 0;
     ExtractedToken = GET_LE_U_2(p);
+
     /* All swXtch packets must have the following token value */
-    if (ExtractedToken == EXPECTED_TOKEN)
+    if (ExtractedToken == EXPECTED_TOKEN) {
+        ND_PRINT(" \nTOKEN OK\n");
         return 1;
-    else
+
+    } else {
+        ND_PRINT(" \nINVALID TOKEN %04x\n",ExtractedToken);
+
         return 0;
+    }
 }
 
 static void print_all_bytes(netdissect_options* ndo, const u_char* start, const u_char* end) {
@@ -342,13 +349,13 @@ void printBytes(const void *ptr, size_t size) {
 
 void processPerfMetaData(netdissect_options* ndo, const u_char* bp, const u_char* end) {
     struct PerfMetaData_t perfMetaData;
-    char* convertedDate;
+    const char * convertedDate;
 
     if (end - bp >= sizeof(struct PerfMetaData_t)) {
         perfMetaData = *((struct PerfMetaData_t*)bp);
         if (perfMetaData.token == EXPECTED_PERF_TOKEN) {
             perfMetaData.seq = bigEndianToLittleEndian64(perfMetaData.seq);
-            convertedDate = convertTimestampFromBytes(&perfMetaData.timestamp);
+            convertedDate = convertUnixTimeToString(perfMetaData.timestamp, LE);
             ND_PRINT("\nPerfMetaData: Token: 0x%x, Seq: %" PRIu64 ", Timestamp: %s",
                 perfMetaData.token,
                 perfMetaData.seq,
@@ -381,7 +388,7 @@ void processLosslessData(netdissect_options* ndo, const u_char* bp, const u_char
 ND_PRINT("-->Timestamp: %" PRIu64, losslessData->timestamp);
 
 
-    char* convertedDate =convertTimestampFromBytes(&losslessData->timestamp);
+    const char * convertedDate =convertUnixTimeToString(losslessData->timestamp, BE);
     ND_PRINT("\nLossless Data(%s): Seq=%lu, SrcPort=%u, --->Timestamp=%s",
         tok2str(lossless_cmd_type_str, "[type:%u]", losslessData->type),
         losslessData->seq,
@@ -401,14 +408,14 @@ static const u_char* swxtch_print_packet(netdissect_options* ndo,
     uint8_t version = 0;
     static int Cached_xflag = 0;
     static int Cached_Xflag = 0;
-    char* convertedDate;
+    const char * convertedDate;
     struct PerfMetaData_t perfMetaData;
     struct SwxtchMetaData_t swxtchMetaData;
 
     // ND_PRINT("\n--------------------------- START -------------------------------- \n");
 
     if ((end - bp) < sizeof(struct SwxtchMetaData_t)) {
-        ND_PRINT(" (Invalid Swxtch header length)");
+        ND_PRINT(" \n------------->(Invalid Swxtch header length)<-------------\n");
         return end;
     }
 
@@ -435,7 +442,9 @@ static const u_char* swxtch_print_packet(netdissect_options* ndo,
         ND_PRINT("isFragmented:%d\n", isFragmented);
     #endif
 
+    ND_PRINT("\n-----------------------\n");
     ND_PRINT("%s", tok2str(cmd_type_str, "[swxtch:%u]", swxtchMetaData.cmdType));
+    ND_PRINT("\n-----------------------\n");
     if (version > 0) {
         ND_PRINT("(v%i): ", version);
     }
@@ -465,8 +474,8 @@ static const u_char* swxtch_print_packet(netdissect_options* ndo,
             ND_PRINT("mc_off %" PRIu64, (bp - sp));
             ND_PRINT(", mc_len %" PRIu64, (end - bp));
             ND_PRINT(", seq %" PRIu64, swxtchMetaData.seq);
-            convertedDate = convertTimestampFromBytes(&swxtchMetaData.timestamp);
-            ND_PRINT(", ts %s" PRIu64, convertedDate);
+            convertedDate = convertUnixTimeToString(swxtchMetaData.timestamp, LE);
+            ND_PRINT(", ----> ts %s", convertedDate);
         }
         if (isFragmented){
             processFragmentedData(ndo, end, isLossless);
@@ -491,9 +500,10 @@ static const u_char* swxtch_print_packet(netdissect_options* ndo,
         }
     } else {
         if (ndo->ndo_vflag > 0) {
+            ND_PRINT("-----------------------");
             ND_PRINT(", seq %" PRIu64, swxtchMetaData.seq);
-            convertedDate = convertTimestampFromBytes(&swxtchMetaData.timestamp);
-            ND_PRINT(", ts %s" PRIu64, convertedDate);
+            convertedDate = convertUnixTimeToString(swxtchMetaData.timestamp, LE);
+            ND_PRINT(", ts %s", convertedDate);
         }
     }
 
