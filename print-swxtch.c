@@ -224,7 +224,11 @@ uint64_t bigEndianToLittleEndian64(uint64_t value) {
 }
 
 const char *convertUnixTimeToString(const uint64_t unixTime, int isLittleEndian) {
-    printf("Unix time (nanoseconds): %" PRIu64 "\n", unixTime);
+
+    if (unixTime == 0) {
+        return "Emty Date";
+    }
+    
     time_t seconds;
     struct tm *timeinfo;
     uint64_t timeToUse;
@@ -233,13 +237,9 @@ const char *convertUnixTimeToString(const uint64_t unixTime, int isLittleEndian)
     timeToUse = isLittleEndian ? le64toh(unixTime) : unixTime;
     
     seconds = timeToUse / 1000000000;
-    printf("Unix time (seconds): %ld\n", seconds);
 
     timeinfo = localtime(&seconds);
     strftime(buffer, 20, "%Y-%m-%d %H:%M:%S", timeinfo);
-
-    printf("Date and Time: %s\n", buffer);
-
     return buffer;
 }
 
@@ -339,9 +339,14 @@ static void lossless_print_packet (netdissect_options* ndo,
     }
 }
 
-void printBytes(const void *ptr, size_t size) {
-    const unsigned char *bytes = (const unsigned char *)ptr;
-    for (size_t i = 0; i < size; i++) {
+void printBytes(uint64_t value) {
+
+    unsigned char bytes[sizeof(uint64_t)];
+    for (int i = 0; i < sizeof(uint64_t); i++) {
+        bytes[i] = (value >> (i * 8)) & 0xFF;
+    }
+    printf("Bytes: ");
+    for (int i = sizeof(uint64_t) - 1; i >= 0; i--) {
         printf("%02X ", bytes[i]);
     }
     printf("\n");
@@ -349,18 +354,18 @@ void printBytes(const void *ptr, size_t size) {
 
 void processPerfMetaData(netdissect_options* ndo, const u_char* bp, const u_char* end) {
     struct PerfMetaData_t perfMetaData;
-    const char * convertedDate;
+const char * convertedDate;
 
-    if (end - bp >= sizeof(struct PerfMetaData_t)) {
-        perfMetaData = *((struct PerfMetaData_t*)bp);
-        if (perfMetaData.token == EXPECTED_PERF_TOKEN) {
-            perfMetaData.seq = bigEndianToLittleEndian64(perfMetaData.seq);
-            convertedDate = convertUnixTimeToString(perfMetaData.timestamp, LE);
+if (end - bp >= sizeof(struct PerfMetaData_t)) {
+perfMetaData = *((struct PerfMetaData_t*)bp);
+    if (perfMetaData.token == EXPECTED_PERF_TOKEN) {
+        perfMetaData.seq = bigEndianToLittleEndian64(perfMetaData.seq);
+        convertedDate = convertUnixTimeToString(perfMetaData.timestamp, LE);
             ND_PRINT("\nPerfMetaData: Token: 0x%x, Seq: %" PRIu64 ", Timestamp: %s",
-                perfMetaData.token,
-                perfMetaData.seq,
-                convertedDate);
-            bp += sizeof(struct PerfMetaData_t);
+        perfMetaData.token,
+        perfMetaData.seq,
+        convertedDate);
+        bp += sizeof(struct PerfMetaData_t);
         }
     }
 }
@@ -448,11 +453,7 @@ static const u_char* swxtch_print_packet(netdissect_options* ndo,
     if (version > 0) {
         ND_PRINT("(v%i): ", version);
     }
-    if ((end - bp) < sizeof(struct SwxtchFragMetaData_t)) {
-        ND_PRINT(" (invalid MC header length");
-        return end;
-    }
-    
+  
     if ((swxtchMetaData.cmdType == CMD_TYPE_MCA_MC) || (swxtchMetaData.cmdType == CMD_TYPE_REPL_MC)
         || (swxtchMetaData.cmdType == CMD_TYPE_BRIDGE_MC)) {
 
