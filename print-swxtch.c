@@ -197,7 +197,7 @@ slp_print_ack(netdissect_options *ndo, const u_char *p, u_int avail)
         ND_PRINT(" (ack payload %u bytes)", avail);
         return;
     }
-    ND_PRINT(" expected %" PRIu64 ", max-received %" PRIu64 ", max-sent %" PRIu64,
+    ND_PRINT(" expected %" PRIu64 ", max-received %" PRIu64 ", window-end %" PRIu64,
              GET_LE_U_8(p + 16), GET_LE_U_8(p + 24), GET_LE_U_8(p + 32));
     if (ndo->ndo_vflag > 0)
         ND_PRINT(", rtt %" PRId64 "ns, rtt-var %" PRId64 "ns", GET_LE_S_8(p), GET_LE_S_8(p + 8));
@@ -217,6 +217,8 @@ slp_print_nack(netdissect_options *ndo, const u_char *p, u_int avail)
     ND_PRINT(" %u missing in %u range%s", total, ranges, ranges == 1 ? "" : "s");
     p += 8;
     avail -= 8;
+    if ((uint64_t)ranges * 16 > avail)
+        ND_PRINT(" (invalid: %u range%s present)", avail / 16, avail / 16 == 1 ? "" : "s");
     shown = ndo->ndo_vflag > 1 ? ranges : SLP_NACK_RANGES_SHOWN;
     for (i = 0; i < ranges && avail >= 16; i++, p += 16, avail -= 16) {
         if (i == shown) {
@@ -301,8 +303,12 @@ swxtch_print_test(netdissect_options *ndo, const u_char *p, u_int avail)
         ND_PRINT(" switch-latency requested");
 }
 
+/*
+ * len is what this packet holds of the UDP payload; datagram_len is the whole payload. They differ in an IP
+ * fragment, whose end is not the datagram's end, so the trailers are not there to read.
+ */
 void
-swxtch_print(netdissect_options *ndo, const u_char *bp, const u_int len)
+swxtch_print(netdissect_options *ndo, const u_char *bp, const u_int len, const u_int datagram_len)
 {
     const u_char *payload = bp + SWX_HEADER_LEN;
     const u_char *slp_trailer = NULL;
@@ -327,6 +333,10 @@ swxtch_print(netdissect_options *ndo, const u_char *bp, const u_int len)
     swxtch_print_flags(ndo, flags);
 
     /* Trailers sit at the end, the SLP one outermost, so a short snapshot drops them first. */
+    if ((flags & (SWX_FLAG_LOSSLESS | SWX_FLAG_FRAGMENT)) && len < datagram_len) {
+        ND_PRINT(" (IP fragment, trailer in a later fragment), length %u", datagram_len - SWX_HEADER_LEN);
+        return;
+    }
     if ((flags & (SWX_FLAG_LOSSLESS | SWX_FLAG_FRAGMENT)) && !ND_TTEST_LEN(bp, len)) {
         ND_PRINT(" (trailer not captured, use -s 0), length %u", len - SWX_HEADER_LEN);
         return;
@@ -346,6 +356,9 @@ swxtch_print(netdissect_options *ndo, const u_char *bp, const u_int len)
         swxtch_print_probe(ndo, payload, payload_len);
         break;
     case SWX_KIND_TEST_DATA:
+        /* The test metadata leads the payload, so only the first overlay fragment carries it. */
+        if (frag_trailer != NULL && GET_U_1(frag_trailer) != 0)
+            break;
         ND_PRINT(":");
         swxtch_print_test(ndo, payload, payload_len);
         payload_len = payload_len >= SWX_TEST_LEN ? payload_len - SWX_TEST_LEN : 0;

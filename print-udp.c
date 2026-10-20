@@ -539,7 +539,7 @@ udp_print(netdissect_options *ndo, const u_char *bp, u_int length,
 	if (!ndo->ndo_qflag) {
 		/* First: the swXtch overlay is recognised by its magic, whatever the other port is. */
 		if (IS_SRC_OR_DST_PORT(ISSWXTCH_PORT_DATA) && swxtch_detect(ndo, cp, length))
-			swxtch_print(ndo, cp, length);
+			swxtch_print(ndo, cp, length, ulen);
 		else if (IS_SRC_OR_DST_PORT(NAMESERVER_PORT))
 			/* over_tcp: FALSE, is_mdns: FALSE */
 			domain_print(ndo, cp, length, FALSE, FALSE);
