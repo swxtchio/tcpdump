@@ -304,6 +304,35 @@ swxtch_print_test(netdissect_options *ndo, const u_char *p, u_int avail)
 }
 
 /*
+ * -XXX / -xxx dump only the tunneled application payload, after the overlay header and before any trailer.
+ * print.c dumps the whole frame for any -X/-x count above one, so the flag is taken over here on its first
+ * use and kept for the rest of the run.
+ */
+static int payload_only_ascii;
+static int payload_only_hex;
+
+static void
+swxtch_take_payload_dump(netdissect_options *ndo)
+{
+    if (ndo->ndo_Xflag > 2) {
+        payload_only_ascii = 1;
+        ndo->ndo_Xflag = 0;
+    } else if (ndo->ndo_xflag > 2) {
+        payload_only_hex = 1;
+        ndo->ndo_xflag = 0;
+    }
+}
+
+static void
+swxtch_dump_payload(netdissect_options *ndo, const u_char *payload, u_int payload_len)
+{
+    if (payload_only_ascii)
+        hex_and_ascii_print(ndo, "\n\t", payload, payload_len);
+    else if (payload_only_hex)
+        hex_print(ndo, "\n\t", payload, payload_len);
+}
+
+/*
  * len is what this packet holds of the UDP payload; datagram_len is the whole payload. They differ in an IP
  * fragment, whose end is not the datagram's end, so the trailers are not there to read.
  */
@@ -311,6 +340,7 @@ void
 swxtch_print(netdissect_options *ndo, const u_char *bp, const u_int len, const u_int datagram_len)
 {
     const u_char *payload = bp + SWX_HEADER_LEN;
+    const u_char *app;
     const u_char *slp_trailer = NULL;
     const u_char *frag_trailer = NULL;
     u_int payload_len = len - SWX_HEADER_LEN;
@@ -318,6 +348,7 @@ swxtch_print(netdissect_options *ndo, const u_char *bp, const u_int len, const u
     uint64_t sequence;
 
     ndo->ndo_protocol = "swxtch";
+    swxtch_take_payload_dump(ndo);
     kind = GET_U_1(bp + 2) & SWX_KIND_MASK;
     flags = GET_U_1(bp + 3);
     sequence = GET_BE_U_8(bp + 4);
@@ -341,6 +372,12 @@ swxtch_print(netdissect_options *ndo, const u_char *bp, const u_int len, const u
         ND_PRINT(" (trailer not captured, use -s 0), length %u", len - SWX_HEADER_LEN);
         return;
     }
+    if (payload_len < ((flags & SWX_FLAG_LOSSLESS) ? SWX_SLP_TRAILER_LEN : 0) +
+                      ((flags & SWX_FLAG_FRAGMENT) ? SWX_FRAG_TRAILER_LEN : 0)) {
+        ND_PRINT(" (%u bytes after the header cannot hold the flagged trailers)", payload_len);
+        nd_print_invalid(ndo);
+        return;
+    }
     if ((flags & SWX_FLAG_LOSSLESS) && payload_len >= SWX_SLP_TRAILER_LEN) {
         slp_trailer = bp + len - SWX_SLP_TRAILER_LEN;
         payload_len -= SWX_SLP_TRAILER_LEN;
@@ -350,6 +387,7 @@ swxtch_print(netdissect_options *ndo, const u_char *bp, const u_int len, const u
         payload_len -= SWX_FRAG_TRAILER_LEN;
     }
 
+    app = payload;
     switch (kind) {
     case SWX_KIND_PROBE:
         ND_PRINT(":");
@@ -361,6 +399,7 @@ swxtch_print(netdissect_options *ndo, const u_char *bp, const u_int len, const u
             break;
         ND_PRINT(":");
         swxtch_print_test(ndo, payload, payload_len);
+        app = payload + SWX_TEST_LEN;
         payload_len = payload_len >= SWX_TEST_LEN ? payload_len - SWX_TEST_LEN : 0;
         break;
     default:
@@ -373,6 +412,8 @@ swxtch_print(netdissect_options *ndo, const u_char *bp, const u_int len, const u
         slp_print(ndo, kind, payload, payload_len, slp_trailer);
     else if (kind == SWX_KIND_SLP_CONTROL)
         ND_PRINT(" (no SLP trailer)");
-    if (kind == SWX_KIND_DATA || kind == SWX_KIND_TEST_DATA)
+    if (kind == SWX_KIND_DATA || kind == SWX_KIND_TEST_DATA) {
         ND_PRINT(", length %u", payload_len);
+        swxtch_dump_payload(ndo, app, payload_len);
+    }
 }
